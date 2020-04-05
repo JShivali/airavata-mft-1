@@ -65,10 +65,9 @@ public class MFTApiHandler extends MFTApiServiceGrpc.MFTApiServiceImplBase {
             String transferId = mftConsulClient.submitTransfer(transferRequest);
             logger.info("Submitted the transfer request {}", transferId);
 
-            mftConsulClient.saveTransferState(transferId, new TransferState()
+            mftConsulClient.submitTransferState(transferId, new TransferState()
                     .setUpdateTimeMils(System.currentTimeMillis())
                     .setState("RECEIVED").setPercentage(0)
-                    .setPublisher("api")
                     .setDescription("Received transfer job " + transferId));
 
             responseObserver.onNext(TransferApiResponse.newBuilder().setTransferId(transferId).build());

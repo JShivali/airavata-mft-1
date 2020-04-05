@@ -23,10 +23,10 @@ import com.orbitz.consul.cache.ConsulCache;
 import com.orbitz.consul.cache.KVCache;
 import com.orbitz.consul.model.kv.Value;
 import org.apache.airavata.mft.admin.MFTConsulClient;
-import org.apache.airavata.mft.admin.MFTConsulClientException;
+import org.apache.airavata.mft.admin.MFTAdminException;
 import org.apache.airavata.mft.admin.models.TransferCommand;
 import org.apache.airavata.mft.admin.models.TransferRequest;
-import org.apache.airavata.mft.admin.models.TransferState;
+import org.dozer.DozerBeanMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,8 +36,6 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.context.annotation.ComponentScan;
 
-import javax.annotation.PreDestroy;
-import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Executors;
@@ -53,113 +51,89 @@ public class MFTController implements CommandLineRunner {
     private static final Logger logger = LoggerFactory.getLogger(MFTController.class);
 
     private final Semaphore mainHold = new Semaphore(0);
-    private ObjectMapper mapper = new ObjectMapper();
 
     private KVCache messageCache;
     private KVCache stateCache;
+    private ConsulCache.Listener<String, Value> messageCacheListener;
+    private ConsulCache.Listener<String, Value> stateCacheListener;
     private ScheduledExecutorService pendingMonitor;
 
     @Autowired
     private MFTConsulClient mftConsulClient;
 
     private ObjectMapper jsonMapper = new ObjectMapper();
+    private DozerBeanMapper dozerBeanMapper = new DozerBeanMapper();
+
 
     public void init() {
-        logger.info("Initializing the Controller");
-        messageCache = KVCache.newCache(mftConsulClient.getKvClient(), MFTConsulClient.CONTROLLER_TRANSFER_MESSAGE_PATH);
-        stateCache = KVCache.newCache(mftConsulClient.getKvClient(), MFTConsulClient.CONTROLLER_STATE_MESSAGE_PATH);
+        messageCache = KVCache.newCache(mftConsulClient.getKvClient(), "mft/controller/messages");
+        stateCache = KVCache.newCache(mftConsulClient.getKvClient(), "mft/transfer/state");
         pendingMonitor = Executors.newSingleThreadScheduledExecutor();
 
         pendingMonitor.scheduleWithFixedDelay(this::processPending, 2000, 4000, TimeUnit.MILLISECONDS);
-        logger.info("Controller initialized");
     }
 
-    @PreDestroy
-    public void destroy() {
-        logger.info("Destroying the Controller");
-        try {
-            if (this.pendingMonitor != null) {
-                this.pendingMonitor.shutdown();
-            }
-        } catch (Exception e) {
-            logger.warn("Errored while shutting down the pending monitor", e);
-        }
-        logger.info("Controller destroyed");
-    }
-
-    /**
-     * Accepts transfer requests coming from the API and put it into the pending queue
-     */
     private void acceptRequests() {
-        // Due to bug in consul https://github.com/hashicorp/consul/issues/571
-        ConsulCache.Listener<String, Value> messageCacheListener = newValues -> newValues.forEach((key, value) -> {
-            String transferId = key.substring(key.lastIndexOf("/") + 1);
-            Optional<String> decodedValue = value.getValueAsString();
-            decodedValue.ifPresent(v -> {
-                logger.info("Received transfer request : {} with id {}", v, transferId);
+        messageCacheListener = newValues -> {
+            newValues.forEach((key, value) -> {
+                String transferId = key.substring(key.lastIndexOf("/") + 1);
+                Optional<String> decodedValue = value.getValueAsString();
+                decodedValue.ifPresent(v -> {
+                    logger.info("Value is: {}", v);
+                    try {
+                        TransferRequest transferRequest = jsonMapper.readValue(v, TransferRequest.class);
+                        String selectedAgent = selectAgent(transferRequest);
 
-                TransferRequest transferRequest;
-                try {
-                    transferRequest = jsonMapper.readValue(v, TransferRequest.class);
-                } catch (IOException e) {
-                    logger.error("Failed to parse the transfer request {}", v, e);
-                    return;
-                }
-
-                try {
-                    markAsPending(transferId, transferRequest);
-                    logger.info("Marked transfer {} as pending", transferId);
-
-                } catch (Exception e) {
-                    logger.error("Failed to store transfer request {}", transferId, e);
-
-                } finally {
-                    logger.info("Deleting key " + value.getKey());
-                    mftConsulClient.getKvClient().deleteKey(value.getKey()); // Due to bug in consul https://github.com/hashicorp/consul/issues/571
-                }
+                        if (selectedAgent != null) {
+                            logger.info("Found agent {} to initiate the transfer {}", selectedAgent, transferId);
+                            TransferCommand transferCommand = convertRequestToCommand(transferId, transferRequest);
+                            mftConsulClient.commandTransferToAgent(selectedAgent, transferCommand);
+                            markAsProcessed(transferId, transferRequest);
+                            logger.info("Marked transfer {} as processed", transferId);
+                        } else {
+                            markAsPending(transferId, transferRequest);
+                            logger.info("Marked transfer {} as pending", transferId);
+                        }
+                    } catch (Exception e) {
+                        logger.error("Failed to process the request", e);
+                    } finally {
+                        logger.info("Deleting key " + value.getKey());
+                        mftConsulClient.getKvClient().deleteKey(value.getKey()); // Due to bug in consul https://github.com/hashicorp/consul/issues/571
+                    }
+                });
             });
-        });
+        };
         messageCache.addListener(messageCacheListener);
         messageCache.start();
     }
 
     private void acceptStates() {
-        ConsulCache.Listener<String, Value> stateCacheListener = newValues -> newValues.forEach((key, value) -> {
-            try {
-                if (value.getValueAsString().isPresent()) {
-                    String valAsStr = value.getValueAsString().get();
-                    logger.info("Received state Key {} val {}", key, valAsStr);
+        stateCacheListener = newValues -> {
+            newValues.forEach((key, value) -> {
+                try {
+                    if (value.getValueAsString().isPresent()) {
+                        String asStr = value.getValueAsString().get();
 
-                    String parts[] = key.split("/");
-                    if (parts.length != 3) {
-                        logger.error("Invalid status key {}", key);
+                        //logger.info("Received state Key {} val {}", key, asStr);
                     }
-
-                    String transferId = parts[0];
-                    String agentId = parts[1];
-                    String time = parts[2];
-
-                    TransferState transferState = mapper.readValue(valAsStr, TransferState.class);
-                    mftConsulClient.saveTransferState(transferId, transferState);
-
+                } catch (Exception e) {
+                    logger.error("Error while processing the state message", e);
+                } finally {
+                    //logger.info("Deleting key " + value.getKey());
+                    //kvClient.deleteKey(value.getKey()); // Due to bug in consul https://github.com/hashicorp/consul/issues/571
                 }
-            } catch (Exception e) {
-                logger.error("Error while processing the state message", e);
-            } finally {
-                logger.info("Deleting key " + value.getKey());
-                mftConsulClient.getKvClient().deleteKey(value.getKey()); // Due to bug in consul https://github.com/hashicorp/consul/issues/571
-            }
-        });
-        stateCache.addListener(stateCacheListener);
-        stateCache.start();
+            });
+        };
+        //stateCache.addListener(stateCacheListener);
+        //stateCache.start();
     }
 
     private void markAsProcessed(String transferId, TransferRequest transferRequest) throws JsonProcessingException {
-        mftConsulClient.getKvClient().putValue(MFTConsulClient.TRANSFER_PROCESSED_PATH +transferId, jsonMapper.writeValueAsString(transferRequest));
+        mftConsulClient.getKvClient().putValue("mft/transfer/processed/" +transferId, jsonMapper.writeValueAsString(transferRequest));
     }
 
     private void markAsPending(String transferId, TransferRequest transferRequest) throws JsonProcessingException {
-        mftConsulClient.getKvClient().putValue(MFTConsulClient.TRANSFER_PENDING_PATH +transferId, jsonMapper.writeValueAsString(transferRequest));
+        mftConsulClient.getKvClient().putValue("mft/transfer/pending/" +transferId, jsonMapper.writeValueAsString(transferRequest));
     }
 
     private TransferCommand convertRequestToCommand(String transferId, TransferRequest transferRequest) {
@@ -178,18 +152,12 @@ public class MFTController implements CommandLineRunner {
         return transferCommand;
     }
 
-    private Optional<String> selectAgent(String transferId, TransferRequest transferRequest) throws MFTConsulClientException {
+    private String selectAgent(TransferRequest transferRequest) throws ControllerException, MFTAdminException {
 
         List<String> liveAgentIds = mftConsulClient.getLiveAgentIds();
         if (liveAgentIds.isEmpty()) {
             logger.error("Live agents are not available. Skipping for now");
-            return Optional.empty();
-        }
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("Processing transfer request {} with target agents {}", transferId, transferRequest.getTargetAgents());
-            logger.debug("Printing live agents");
-            liveAgentIds.forEach(a -> logger.debug("Agent {} is live", a));
+            return null;
         }
 
         String selectedAgent = null;
@@ -205,41 +173,33 @@ public class MFTController implements CommandLineRunner {
 
         if (selectedAgent == null) {
             logger.warn("Couldn't find an Agent that meet transfer requirements");
-            return Optional.empty();
         }
 
-        return Optional.of(selectedAgent);
+        return selectedAgent;
     }
 
-    /**
-     * Fetch pending transfer requests and check for available agents. If an agent is found, forwards the transfer request
-     * to that agent and mark transfer state as processed.
-     */
     private void processPending() {
-        List<Value> values = mftConsulClient.getKvClient().getValues(MFTConsulClient.TRANSFER_PENDING_PATH);
+        List<Value> values = mftConsulClient.getKvClient().getValues("mft/transfer/pending");
         logger.debug("Scanning pending transfers");
 
         values.forEach(value -> {
+            logger.debug("Pending " + value.getKey() + " : " + value.getValueAsString().get());
+            try {
+                TransferRequest transferRequest = jsonMapper.readValue(value.getValueAsString().get(), TransferRequest.class);
+                String transferId = value.getKey().substring(value.getKey().lastIndexOf("/") + 1);
+                String agent = selectAgent(transferRequest);
 
-            if (value.getValueAsString().isPresent()) {
-                logger.debug("Pending " + value.getKey() + " : " + value.getValueAsString().get());
-                try {
-                    TransferRequest transferRequest = jsonMapper.readValue(value.getValueAsString().get(), TransferRequest.class);
-                    String transferId = value.getKey().substring(value.getKey().lastIndexOf("/") + 1);
-                    Optional<String> agent = selectAgent(transferId, transferRequest);
+                if (agent != null) {
+                    logger.info("Found agent {} to initiate the transfer {}", agent, transferId);
+                    TransferCommand transferCommand = convertRequestToCommand(transferId, transferRequest);
 
-                    if (agent.isPresent()) {
-                        logger.info("Found agent {} to initiate the transfer {}", agent, transferId);
-                        TransferCommand transferCommand = convertRequestToCommand(transferId, transferRequest);
-
-                        mftConsulClient.commandTransferToAgent(agent.get(), transferCommand);
-                        markAsProcessed(transferId, transferRequest);
-                        mftConsulClient.getKvClient().deleteKey(value.getKey());
-                        logger.info("Marked transfer {} as processed", transferId);
-                    }
-                } catch (Exception e) {
-                    logger.error("Failed to process pending transfer in key {}", value.getKey(), e);
+                    mftConsulClient.commandTransferToAgent(agent, transferCommand);
+                    markAsProcessed(transferId, transferRequest);
+                    mftConsulClient.getKvClient().deleteKey(value.getKey());
+                    logger.info("Marked transfer {} as processed", transferId);
                 }
+            } catch (Exception e) {
+                logger.error("Failed to process pending transfer in key {}", value.getKey(), e);
             }
         });
     }

@@ -56,17 +56,21 @@ public class SCPSender implements Connector {
         SecretServiceGrpc.SecretServiceBlockingStub secretClient = SecretServiceClient.buildClient(secretServiceHost, secretServicePort);
         SCPSecret scpSecret = secretClient.getSCPSecret(SCPSecretGetRequest.newBuilder().setSecretId(credentialToken).build());
 
-        logger.info("Creating a ssh session for {}@{}:{}",
-                scpResource.getScpStorage().getUser(), scpResource.getScpStorage().getHost(),
-                scpResource.getScpStorage().getPort());
+        File privateKeyFile = File.createTempFile("id_rsa", "");
+        BufferedWriter writer = new BufferedWriter(new FileWriter(privateKeyFile));
+        writer.write(scpSecret.getPrivateKey());
+        writer.close();
 
-        this.session = SCPTransportUtil.createSession(
-                scpResource.getScpStorage().getUser(),
-                scpResource.getScpStorage().getHost(),
+        logger.info("Creating a ssh session for {}@{}:{} with key {} and passphrase {}",
+                scpResource.getScpStorage().getUser(), scpResource.getScpStorage().getHost(),
                 scpResource.getScpStorage().getPort(),
-                scpSecret.getPrivateKey().getBytes(),
-                scpSecret.getPublicKey().getBytes(),
-                scpSecret.getPassphrase().equals("")? null : scpSecret.getPassphrase().getBytes());
+                privateKeyFile.getPath(),
+                scpSecret.getPassphrase());
+
+        this.session = SCPTransportUtil.createSession(scpResource.getScpStorage().getUser(), scpResource.getScpStorage().getHost(),
+                scpResource.getScpStorage().getPort(),
+                privateKeyFile.getPath(),
+                scpSecret.getPassphrase());
     }
 
     public void destroy() {

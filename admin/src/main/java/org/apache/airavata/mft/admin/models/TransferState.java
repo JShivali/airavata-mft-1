@@ -19,7 +19,6 @@ package org.apache.airavata.mft.admin.models;
 
 public class TransferState {
     private String state;
-    private String publisher;
     private long updateTimeMils;
     private double percentage;
     private String description;
@@ -57,15 +56,6 @@ public class TransferState {
 
     public TransferState setDescription(String description) {
         this.description = description;
-        return this;
-    }
-
-    public String getPublisher() {
-        return publisher;
-    }
-
-    public TransferState setPublisher(String publisher) {
-        this.publisher = publisher;
         return this;
     }
 }

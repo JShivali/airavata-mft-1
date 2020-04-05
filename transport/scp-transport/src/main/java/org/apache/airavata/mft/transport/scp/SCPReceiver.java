@@ -53,13 +53,19 @@ public class SCPReceiver implements Connector {
         SecretServiceGrpc.SecretServiceBlockingStub secretClient = SecretServiceClient.buildClient(secretServiceHost, secretServicePort);
         SCPSecret scpSecret = secretClient.getSCPSecret(SCPSecretGetRequest.newBuilder().setSecretId(credentialToken).build());
 
+        File privateKeyFile = File.createTempFile("id_rsa", "");
+        BufferedWriter writer = new BufferedWriter(new FileWriter(privateKeyFile));
+        writer.write(scpSecret.getPrivateKey());
+        writer.close();
+
+        privateKeyFile.deleteOnExit();
+
         this.session = SCPTransportUtil.createSession(
                 scpResource.getScpStorage().getUser(),
                 scpResource.getScpStorage().getHost(),
                 scpResource.getScpStorage().getPort(),
-                scpSecret.getPrivateKey().getBytes(),
-                scpSecret.getPublicKey().getBytes(),
-                scpSecret.getPassphrase().equals("")? null : scpSecret.getPassphrase().getBytes());
+                privateKeyFile.getPath(),
+                scpSecret.getPassphrase());
     }
 
     public void destroy() {

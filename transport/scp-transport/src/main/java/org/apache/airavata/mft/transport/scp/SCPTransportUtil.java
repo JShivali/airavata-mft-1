@@ -24,17 +24,22 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Properties;
-import java.util.UUID;
 
 public class SCPTransportUtil {
 
     private static final Logger logger = LoggerFactory.getLogger(SCPTransportUtil.class);
 
-    public static Session createSession(String user, String host, int port, byte[] pvtKey, byte[] pubKey, byte[] passphrase) throws Exception {
+    public static Session createSession(String user, String host, int port, String keyFilePath, String keyPassword) throws Exception {
         try {
             JSch jsch = new JSch();
 
-            jsch.addIdentity(UUID.randomUUID().toString(), pvtKey, pubKey, passphrase);
+            if (keyFilePath != null) {
+                if (keyPassword != null) {
+                    jsch.addIdentity(keyFilePath, keyPassword);
+                } else {
+                    jsch.addIdentity(keyFilePath);
+                }
+            }
 
             Properties config = new java.util.Properties();
             config.put("StrictHostKeyChecking", "no");
